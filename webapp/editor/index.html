@@ -9,7 +9,7 @@
 <title>Felucca Editor</title>
 <link rel="icon" href="data:,">
 <meta name="felucca-release" content="1.8.1">
-  <meta name="felucca-try" content="1">
+  <meta name="felucca-try" content="next">
 <style>
 /* SPDX-License-Identifier: GPL-3.0-only
  * Copyright (C) 2026 Leo Kuroshita (@kurogedelic), Hügelton Instruments */
@@ -402,7 +402,7 @@ input.text.bad { box-shadow: inset 0 -2px 0 var(--accent); }
 input.text.wide { width: 100%; margin-bottom: 16px; }
 
 /* ---- SAMPLES ---- */
-.subtabs { max-width: 320px; margin-bottom: var(--gap); }
+.subtabs { max-width: 440px; margin-bottom: var(--gap); }
 .grid.samples { columns: 420px; }
 .slothead { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
 .slothead b { color: var(--theme); font-weight: 600; font-size: 1rem; }
@@ -614,7 +614,8 @@ const CMD = { INFO: 1, GET: 2, SET: 3, DUMP: 4, DESC: 5, STEP_GET: 6, STEP_SET: 
   UI_STATE: 34, UI_SET: 35, UI_PALETTES: 36, FAV_GET: 37, FAV_SET: 38,
   MOTION: 64, BACKUP_LIST: 65, BACKUP_GET: 66, BACKUP_PUT: 67,
   FM6_GET: 68, FM6_PUT: 69, FM6_LIST: 70, FM6_ERASE: 71, MENU_DESC: 72, MENU_SET: 73,
-  FM6B_BEGIN: 74, FM6B_WRITE: 75, FM6B_END: 76, FM6B_LIST: 77, LEARN_GET: 78, LEARN_SET: 79, PALETTE_GET: 80, PALETTE_SET: 81 };
+  FM6B_BEGIN: 74, FM6B_WRITE: 75, FM6B_END: 76, FM6B_LIST: 77, LEARN_GET: 78, LEARN_SET: 79, PALETTE_GET: 80, PALETTE_SET: 81,
+  PLUGIN_INFO: 82, PLUGIN_ERASE: 83, PLUGIN_WRITE: 84, PLUGIN_REG: 85, PLUGIN_RESTART: 86, PLUGIN_ENGINES: 87 };
 /* frames the device sends on its own (while WATCH is on); never replies */
 const PUSH = new Set([CMD.CHANGED, CMD.RELOAD, CMD.STEP_CHANGED, CMD.TRACK_CHANGED]);
 /* user preset bank: name 1..12 printable ASCII, a 16-step pattern of (note, flags 1 acc 2 slide 4 tie) */
@@ -695,6 +696,7 @@ class Reader {
   b() { if (this.i >= this.a.length) throw new Error("short reply"); return this.a[this.i++]; }
   v() { const lo = this.b(); return v14dec(lo, this.b()); }
   s() { let s = ""; for (;;) { const c = this.b(); if (!c) return s; s += String.fromCharCode(c); } }
+  u32() { let v = 0; for (let k = 0; k < 5; k++) v += (k === 4 ? this.b() & 15 : this.b()) * 2 ** (7 * k); return v >>> 0; }   /* five 7-bit bytes, LSB first */
 }
 
 const parse = {
@@ -732,7 +734,7 @@ const parse = {
       /* the tagged blocks from 53 01 on, walked by their known lengths (an unknown tag ends the walk): 1.2's 57 01 n =
          SONG sections with a slot per track (n lanes; SONG ops 4..7) */
       /* (1.4.1's 56 01 n: FM6's voice bank, n voices: cmds 74..77, SLOT 9.. = B1..Bn) */
-      const LEN = { 0x53: 1, 0x50: 1, 0x4E: 1, 0x52: 1, 0x4C: 1, 0x41: 2, 0x54: 1, 0x57: 1, 0x56: 1, 0x43: 1, 0x4B: 1, 0x45: 1 };   /* (1.5.5's 4B 01 n: a step's condition, n of them) */   /* (1.5's 43 01 n: MIDI LEARN, cmds 78, 79) */
+      const LEN = { 0x53: 1, 0x50: 1, 0x4E: 1, 0x52: 1, 0x4C: 1, 0x41: 2, 0x54: 1, 0x57: 1, 0x56: 1, 0x43: 1, 0x4B: 1, 0x45: 1, 0x58: 1 };   /* (1.5.5's 4B 01 n: a step's condition, n of them) */   /* (1.5's 43 01 n: MIDI LEARN, cmds 78, 79) */
       for (let q = p + 4; q + 2 < trailer.length && trailer[q + 1] === 1 && LEN[trailer[q]]; q += 2 + LEN[trailer[q]]) {
         if (trailer[q] === 0x57) o.songLanes = trailer[q + 2];
         if (trailer[q] === 0x41 && q + 3 < trailer.length) o.motionCap = trailer[q + 2] | trailer[q + 3] << 7;   /* 1.2: 128 */
@@ -741,6 +743,7 @@ const parse = {
         if (trailer[q] === 0x43) o.midiLearn = trailer[q + 2];                                                  /* 1.5: 16 */
         if (trailer[q] === 0x4B) o.cond = trailer[q + 2];                                                       /* 1.5.5: 11 */
         if (trailer[q] === 0x45) o.customPalette = trailer[q + 2];                                              /* 1.6: 5 (CUSTOM palette, cmds 80, 81) */
+        if (trailer[q] === 0x58) o.plugins = trailer[q + 2];                                                    /* 1.9: plugin engines listed (cmds 82..87) */
       }
     }
     o.menuCount = o.menuCount || 0;
@@ -751,6 +754,8 @@ const parse = {
     o.midiLearn = o.midiLearn || 0;               /* MIDI LEARN's entries (1.5): 0 none */
     o.cond = o.cond || 0;                         /* a step's conditions (1.5.5): 0 none (no condition byte in steps) */
     o.customPalette = o.customPalette || 0;       /* CUSTOM palette's colours (1.6): 0 none (no PALETTE_GET / _SET) */
+    o.plugins = o.plugins ?? null;                /* plugin engines listed (1.9, may be 0); null: no PLUGIN_* commands */
+    o.userEngine = o.plugins == null ? o.nengines : PLUGIN.NENGINES;   /* the engine byte of a user slot in FAV_* (NENGINES) */
     o.categories = o.motionCap > 0;               /* user preset categories (1.2 / 1.4, with the same tags) */
     return o;
   },
@@ -819,6 +824,24 @@ const parse = {
     o.titles = [];
     try { o.titles.push(r.s(), r.s()); } catch (e) { o.titles = []; }   /* older firmware: no page titles */
     return o;
+  },
+  /* 1.9 plugin engines (82..87); a build without the plugin flash answers each but PLUGIN_ENGINES with the byte 1 */
+  [CMD.PLUGIN_INFO](a) {
+    if (a.length < 3) return { rc: a[0] ?? 1, abi: 0, slots: [], given: [] };
+    const r = new Reader(a), o = { rc: 0, abi: r.b(), slots: [], given: [] }, n = r.b();
+    for (let k = 0; k < n; k++) o.slots.push({ slot: k, state: r.b(), id: r.u32(), version: r.u32(), no: r.b(), name: r.s() });
+    const c = r.b();
+    for (let k = 0; k < c; k++) o.given.push({ no: r.b() + PLUGIN.PLUG0, id: r.u32() });
+    return o;
+  },
+  [CMD.PLUGIN_ERASE](a) { return a.length < 2 ? { slot: null, rc: a[0] ?? 1 } : { slot: a[0], rc: a[1] }; },
+  [CMD.PLUGIN_WRITE](a) { return a.length < 5 ? { slot: null, offset: null, rc: a[0] ?? 1 } : { slot: a[0], offset: a[1] | a[2] << 7 | a[3] << 14, rc: a[4] }; },
+  [CMD.PLUGIN_REG](a) { return a.length < 2 ? { no: null, rc: a[0] ?? 1 } : { no: a[0] + PLUGIN.PLUG0, rc: a[1] }; },
+  [CMD.PLUGIN_RESTART](a) { return { rc: a[0] ?? 1 }; },
+  [CMD.PLUGIN_ENGINES](a) {
+    const r = new Reader(a), n = r.b(), out = [];
+    for (let k = 0; k < n; k++) out.push({ no: r.b(), name: r.s() });
+    return out;
   },
   [CMD.SMP_BEGIN](a) { const r = new Reader(a); return { slot: r.b(), rc: r.b() }; },
   [CMD.SMP_WRITE](a) { const r = new Reader(a); return { slot: r.b(), offset: r.b() | (r.b() << 7) | (r.b() << 14), rc: r.b() }; },
@@ -1037,6 +1060,14 @@ const req = {
   /* MENU settings (firmware with info.menuCount) */
   menuDesc: (i) => [CMD.MENU_DESC, [i & 0x7F]],
   menuSet: (id, v) => [CMD.MENU_SET, [id & 0x7F, ...v14enc(v)]],
+  /* plugin engines (info.plugins != null): the slots, a slot erased, a page (offset a multiple of 256, at most 256
+     bytes) into an erased slot, the number of a plugin of its own (its id), the restart, the engines listed */
+  pluginInfo: () => [CMD.PLUGIN_INFO, []],
+  pluginErase: (k) => [CMD.PLUGIN_ERASE, [k & 0x7F]],
+  pluginWrite: (k, off, bytes) => [CMD.PLUGIN_WRITE, [k & 0x7F, off & 0x7F, (off >> 7) & 0x7F, (off >> 14) & 0x7F, ...pack7(bytes)]],
+  pluginReg: (id) => [CMD.PLUGIN_REG, u32enc(id)],
+  pluginRestart: () => [CMD.PLUGIN_RESTART, []],
+  pluginEngines: () => [CMD.PLUGIN_ENGINES, []],
 };
 
 /* which reply belongs to which request (the device echoes these) */
@@ -1057,6 +1088,8 @@ function replyMatches(cmd, args, a) {
     case CMD.FM6_ERASE: return a[0] === args[0];
     case CMD.FM6B_WRITE: return a[0] === args[0];
     case CMD.MENU_DESC: return a[0] === args[0];
+    case CMD.PLUGIN_ERASE: return a.length === 1 || a[0] === args[0];   /* (1: no plugin flash) */
+    case CMD.PLUGIN_WRITE: return a.length === 1 || (a[0] === args[0] && a[1] === args[1] && a[2] === args[2] && a[3] === args[3]);
     case CMD.MENU_SET: return a[1] === args[0];
     case CMD.PROJECT: return a[0] === args[0] && a[1] === args[1];
     case CMD.UP_LIST: case CMD.UP_GET: case CMD.UP_PUT: case CMD.UP_STORE: case CMD.UP_LOAD: case CMD.UP_ERASE:
@@ -1222,6 +1255,77 @@ const CRC_TABLE = (() => {
   return t;
 })();
 function crc32(b) { let c = 0xFFFFFFFF; for (let i = 0; i < b.length; i++) c = CRC_TABLE[(c ^ b[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
+
+/* ------------------------------------------------------ plugin engines (1.9) --- */
+/* The FM-1's two plugin slots (EDITOR_PROTOCOL.md "Plugin engines"; Felucca-Engines src/felucca_plugin_fm1.h). A .fep
+   file is a 96-byte little-endian header (fe_fm1_hdr_t), then the image (the code and constants, then the .data's first
+   values) whose zlib CRC-32 the header holds; it is linked for one slot. A plugin of its own (engine NEW) plays under a
+   number the device gives its id once (PLUG0 ..); UNKNOWN is a number no plugin is ever given (a track of a plugin the
+   device does not have: NO PLUGIN) */
+const PLUGIN = {
+  ABI: 1, HDR_SIZE: 96, MAGIC: 0x31504546, PLATFORM: 0x20314D46, NEW: 0xFF, PLUG0: 32, UNKNOWN: 95, OWN: 127, NSLOT: 2, NENGINES: 96,
+  PAGE: 256, SLOT_FLASH: [0x93000, 0x95000], SLOT_SIZE: [0x2000, 0x1E00], SLOT_RAM: [0x01C72000, 0x01C73000], RAM_SIZE: 0x1000,
+  /* PLUGIN_INFO's states and the commands' rc, as words for the page (text.js plgSt*, plgRc*) */
+  STATES: ["empty", "playing", "bad", "refused", "crashed", "nonumber"],
+  RC: ["done", "args", "flash", "playing", "full", "mark"],
+};
+/* an engine number's name: the device's (INFO, and PLUGIN_ENGINES merged in: Device.readPluginEngines); a number past
+   Felucca's that no plugin here plays (95: one this device never had) plays a sine: NO PLUGIN, as the device says */
+const NO_PLUGIN = "NO PLUGIN";
+function engineNameOf(info, n) {
+  if (!info || n == null) return "";
+  const x = (info.engines || [])[n];
+  return x != null ? x : n >= info.nengines ? NO_PLUGIN : "";
+}
+const isPluginNo = (info, n) => !!info && info.plugins != null && n >= PLUGIN.PLUG0 && n < PLUGIN.NENGINES;
+/* where slot k's image runs (the XIP window maps flash offset f at 0x02000000 + f - 0x4000), after the header */
+const pluginXip = (k) => 0x02000000 + PLUGIN.SLOT_FLASH[k] - 0x4000 + PLUGIN.HDR_SIZE;
+const u32enc = (v) => [0, 7, 14, 21, 28].map((k) => (v >>> k) & 0x7F);
+/* an id's four characters (FE_ID('a', 'b', 'c', 'd'): a in the top byte); printable ASCII each, as the device asks */
+const pluginIdText = (id) => [24, 16, 8, 0].map((k) => String.fromCharCode((id >>> k) & 0xFF)).join("");
+const pluginIdOk = (id) => [24, 16, 8, 0].every((k) => ((id >>> k) & 0xFF) >= 32 && ((id >>> k) & 0xFF) <= 126);
+/* a .fep's header, checked as the device's loader checks it (plugin_fm1.c plg_fm1_ok) and as the slot takes it
+   (editor_plugin.c: its size, the update record's mark): -> {ok: true, slot, id, idText, version, engine, name, size}
+   or {ok: false, error: short magic header platform abi slot size link crc id mark, ...} */
+function readFep(bytes) {
+  const b = bytes instanceof Uint8Array ? bytes : Uint8Array.from(bytes || []);
+  if (b.length < PLUGIN.HDR_SIZE) return { ok: false, error: "short" };
+  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength), u = (o) => dv.getUint32(o, true);
+  const h = { magic: u(0), hdrVer: dv.getUint16(4, true), hdrSize: dv.getUint16(6, true), platform: u(8), abi: u(12), id: u(16),
+    version: u(20), engine: u(24), xip: u(28), imageLen: u(32), imageCrc: u(36), entry: u(40), dataOff: u(44), dataAddr: u(48),
+    dataLen: u(52), bssAddr: u(56), bssLen: u(60), slot: u(80) };
+  let name = "";
+  for (let i = 64; i < 80 && b[i]; i++) name += b[i] >= 32 && b[i] < 127 ? String.fromCharCode(b[i]) : "?";
+  const o = { slot: h.slot, id: h.id, idText: pluginIdText(h.id), version: h.version, engine: h.engine, name, size: b.length, abi: h.abi };
+  const no = (error) => ({ ok: false, error, ...o });
+  if (h.magic !== PLUGIN.MAGIC) return no("magic");
+  if (h.hdrVer !== 1 || h.hdrSize !== PLUGIN.HDR_SIZE) return no("header");
+  if (h.platform !== PLUGIN.PLATFORM) return no("platform");
+  if (h.abi !== PLUGIN.ABI) return no("abi");
+  if (h.slot > 1) return no("slot");
+  const k = h.slot, max = PLUGIN.SLOT_SIZE[k], ram = PLUGIN.SLOT_RAM[k], x = pluginXip(k);
+  if (b.length > max || PLUGIN.HDR_SIZE + h.imageLen > max) return no("size");
+  if (PLUGIN.HDR_SIZE + h.imageLen > b.length) return no("short");
+  if (h.xip !== x || h.entry < x || h.entry >= x + h.imageLen || h.dataLen > PLUGIN.RAM_SIZE || h.bssLen > PLUGIN.RAM_SIZE
+    || (h.dataLen && (h.dataOff > h.imageLen - h.dataLen || h.dataAddr < ram || h.dataAddr + h.dataLen > ram + PLUGIN.RAM_SIZE))
+    || (h.bssLen && (h.bssAddr < ram || h.bssAddr + h.bssLen > ram + PLUGIN.RAM_SIZE))) return no("link");
+  if (crc32(b.subarray(PLUGIN.HDR_SIZE, PLUGIN.HDR_SIZE + h.imageLen)) !== h.imageCrc) return no("crc");
+  if (!pluginIdOk(h.id)) return no("id");
+  for (let s = 0xF06; s + 1 < b.length; s += 0x1000) if (b[s] === 0x41 && b[s + 1] === 0x54) return no("mark");   /* "AT" (rc 5) */
+  return { ok: true, ...o };
+}
+/* a .fep as tools/fep_pack.py packs one, around image (the mock's slots, the tests): {slot, id, version, engine, name, image} */
+function makeFep({ slot = 0, id, version = 1, engine = PLUGIN.NEW, name = "", image = new Uint8Array(64), abi = PLUGIN.ABI }) {
+  const img = Uint8Array.from(image), b = new Uint8Array(PLUGIN.HDR_SIZE + img.length), dv = new DataView(b.buffer);
+  const x = pluginXip(slot), w = (o, v) => dv.setUint32(o, v >>> 0, true);
+  w(0, PLUGIN.MAGIC); dv.setUint16(4, 1, true); dv.setUint16(6, PLUGIN.HDR_SIZE, true); w(8, PLUGIN.PLATFORM); w(12, abi);
+  w(16, id); w(20, version); w(24, engine); w(28, x); w(32, img.length); w(36, crc32(img)); w(40, x);
+  w(48, PLUGIN.SLOT_RAM[slot & 1]); w(56, PLUGIN.SLOT_RAM[slot & 1]); w(60, 8);
+  for (let i = 0; i < 15 && i < name.length; i++) b[64 + i] = name.charCodeAt(i) & 0x7F;
+  w(80, slot);
+  b.set(img, PLUGIN.HDR_SIZE);
+  return b;
+}
 
 const IMA_STEP = [7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60, 66, 73, 80, 88,
   97, 107, 118, 130, 143, 157, 173, 190, 209, 230, 253, 279, 307, 337, 371, 408, 449, 494, 544, 598, 658,
@@ -2100,7 +2204,7 @@ function fromPerc(pt, engines, pe0) {
   return { ...pt, engine: drum, engineName: "DRUM", p: q, params: undefined };
 }
 /* an engine's name to show: the reserved engine 1 holds DIGITAL sounds that play as FM6 */
-const engineLabel = (engines, e) => (e === 1 && (engines || [])[1] === "-" ? "FM6" : (engines || [])[e] ?? String(e));
+const engineLabel = (engines, e) => (e === 1 && (engines || [])[1] === "-" ? "FM6" : (engines || [])[e] ?? (e >= PLUGIN.PLUG0 ? NO_PLUGIN : String(e)));
 
 /* the firmware's MENU settings as MENU_DESC lists them (src/menu_items.c, src/editor_menu.c; test_web.mjs: == the
    firmware's, build/host/menu.json): id, name, value names (COLOR: the palettes, UI_PALETTES), the default, (1.0.5)
@@ -2281,6 +2385,43 @@ function makeMockDevice(opt = {}) {
         E("MODE", ["ONE", "GATE", "LOOP"], 0), E("REV", ["OFF", "ON"], 0), D("DCAY", F.TIME, 0, 127, 127), D("TONE", F.INT, 0, 127, 127)],
       presets: [P("CHOP", [0, 2, 0, 0, 0, 0, 127, 127], [0, 127, 127, 30], 0, 9), P("STUTTER", [0, 1, 0, 0, 1, 0, 90, 110], [0, 127, 127, 12], 0, 10)] },
   ];
+  /* 1.9 plugin engines (opt.plugins: true, or the .fep files the slots hold at power-on; editor_plugin.c, plugin_fm1.c):
+     two slots, the numbers given to plugins of their own (32 ..), NENGINES 96 (a user slot's FAV engine byte); a
+     number past Felucca's that no plugin plays is MISSING (a sine). opt.pluginNoFlash: each command but ENGINES -> 1 */
+  const NBI = ENG.length, NENG = opt.plugins ? PLUGIN.NENGINES : NBI;
+  const MISSING = { name: "MISSING", titles: ["MISSING", "MISSING"], edit: new Array(8).fill(D("-", F.INT, 0, 127, 0)),
+    presets: [P("MISSING", [0, 0, 0, 0, 0, 0, 0, 0], [0, 0, 127, 20])] };
+  const plug = { flash: [0, 1].map((k) => new Uint8Array(PLUGIN.SLOT_SIZE[k]).fill(0xFF)), reg: [], state: [0, 0], no: [PLUGIN.OWN, PLUGIN.OWN],
+    eng: new Map(), crash: !!opt.pluginCrash, boots: 0 };
+  const eng = (n) => plug.eng.get(n) || (n < NBI ? ENG[n] : MISSING);
+  const playable = (n) => n < NBI || plug.eng.has(n);
+  /* power-on (plugin_fm1.c plg_fm1_boot): each slot's header and CRC, its number; a crash in the last boot: skipped */
+  function plugBoot() {
+    plug.eng = new Map();
+    for (let k = 0; k < PLUGIN.NSLOT; k++) {
+      const f = plug.flash[k], h = readFep(f);
+      plug.no[k] = PLUGIN.OWN;
+      if (f.subarray(0, 4).every((x) => x === 0xFF)) { plug.state[k] = 0; continue; }
+      if (!h.ok || h.slot !== k) { plug.state[k] = 2; continue; }
+      if (plug.crash) { plug.state[k] = 4; continue; }
+      const no = h.engine === PLUGIN.NEW ? (plug.reg.indexOf(h.id) < 0 ? -1 : PLUGIN.PLUG0 + plug.reg.indexOf(h.id)) : h.engine;
+      if (no < 0) { plug.state[k] = 5; continue; }
+      if ((no >= NBI && no < PLUGIN.PLUG0) || no >= PLUGIN.UNKNOWN || (no < NBI && ENG[no].name === "DRUM") || plug.eng.has(no)) { plug.state[k] = 3; continue; }
+      plug.state[k] = 1; plug.no[k] = no;
+      plug.eng.set(no, { ...ENG[0], name: (h.name || h.idText).slice(0, 8).toUpperCase() });   /* (ANALOG's parameters, its name) */
+    }
+    plug.crash = false; plug.boots++;
+  }
+  if (opt.plugins) {
+    for (const x of Array.isArray(opt.plugins) ? opt.plugins : []) {   /* (.fep files installed, their ids registered) */
+      const h = readFep(x);
+      if (!h.ok) continue;
+      if (h.engine === PLUGIN.NEW && !plug.reg.includes(h.id)) plug.reg.push(h.id);
+      plug.flash[h.slot].fill(0xFF).set(x);
+    }
+    for (const id of opt.pluginIds || []) if (!plug.reg.includes(id)) plug.reg.push(id);   /* (numbers given earlier) */
+    plugBoot();
+  }
   const FM6_E = ENG.findIndex((e) => e.name === "FM6"), FM6_OWN = FM6.FACTORY_PK.length, DRUM_E = ENG.findIndex((e) => e.name === "DRUM");
   /* factory PATTERNS[] (engines.c; the device loads them from SAVE > PHRASES, presets only suggest one): absolute
      notes, 0 rest; flags 1 accent, 2 slide, 4 tie (holds the previous note) */
@@ -2330,7 +2471,7 @@ function makeMockDevice(opt = {}) {
     palette: 0, font: 0, monitor: 0, filter: 0, bankSig: 0,
     palettes: ["GREY", "GREEN", "AMBER", "ICE", "VIOLET", "ROSE", "PAPER", "HI-CON", "NIGHT", "MONO"],
     custom: { stored: false, active: false, c: PAL_BUILTIN[0].c.slice(), preview: null },   /* CUSTOM palette (1.6; palette: the base) */
-    favorites: Array.from({ length: ENG.length + 1 }, () => []),
+    favorites: Array.from({ length: NENG + 1 }, () => []),
     menu: MENU.map((m) => m.def),                   /* the MENU settings' values (COLOR: palette) */
     vbank: { valid: false, name: "", voices: new Array(32).fill(null), tx: null },   /* FM6's voice bank (fm6_vbank.c) */
     learn: new Array(16).fill(null),                /* MIDI LEARN's map (midi_control.c): {cc, track, id} */
@@ -2340,10 +2481,10 @@ function makeMockDevice(opt = {}) {
     Object.defineProperty(st, k, { enumerable: false, get: () => st.tracks[st.sel][k], set: (v) => { st.tracks[st.sel][k] = v; } });
   }
   const watchMs = opt.watchMs || 3000;
-  const desc = (scope, id) => (scope === 0 && id < P_COUNT ? (id >= P_E0 ? ENG[st.engine].edit[id - P_E0] : TP[id])
+  const desc = (scope, id) => (scope === 0 && id < P_COUNT ? (id >= P_E0 ? eng(st.engine).edit[id - P_E0] : TP[id])
     : scope === 1 && id < G_COUNT ? GP[id] : null);
   const EMPTY = { n: 0, notes: [0, 0, 0, 0], time: 2, flags: 0, vel: 0, hit: 0, acc: 0, chance: 100, ratchet: 1 };
-  const isDrum = () => ENG[st.engine].name === "DRUM";
+  const isDrum = () => eng(st.engine) === ENG[DRUM_E];
   const clearSteps = () => st.step.forEach((s) => Object.assign(s, EMPTY, { notes: [0, 0, 0, 0] }));
   function toGrid(s) {                            /* eng_drum.c step_to_grid: a lane's own note becomes its hit */
     if (s.time !== 0) return;
@@ -2358,7 +2499,7 @@ function makeMockDevice(opt = {}) {
   }
   const loadPattern = (k) => loadPat16(PATTERNS[k][0].map((n, i) => [n, PATTERNS[k][1][i]]));
   function applyPreset(pi) {
-    const e = ENG[st.engine];
+    const e = eng(st.engine);
     if (e.name === "SAMPLE" && pi === PERC_SET) { setEngine(DRUM_E); return; }   /* once PERC: DRUM's kit (ui.c apply_preset_to) */
     pi = aliasOf(e.presets.map((x) => x.name), pi % e.presets.length);
     const pr = e.presets[pi];
@@ -2394,9 +2535,9 @@ function makeMockDevice(opt = {}) {
     t.p[P_E0 + 7] = t.slot = k < 0 ? FM6_OWN : k;
   }
   function setEngine(ei) {
-    if (ei % ENG.length === 1) { fm4Load(0); return; }   /* DIGITAL (retired): its first preset, as FM6 (ui.c set_engine_of) */
-    st.engine = ei % ENG.length;
-    for (let i = 0; i < 8; i++) st.p[P_E0 + i] = ENG[st.engine].edit[i].def;
+    if (ei % NENG === 1) { fm4Load(0); return; }   /* DIGITAL (retired): its first preset, as FM6 (ui.c set_engine_of) */
+    st.engine = ei % NENG;
+    for (let i = 0; i < 8; i++) st.p[P_E0 + i] = eng(st.engine).edit[i].def;
     applyPreset(0);
   }
   /* the selected track's sound = p, DIGITAL's values, converted (ui.c fm4_apply) */
@@ -2441,7 +2582,7 @@ function makeMockDevice(opt = {}) {
   /* a few user presets to start with, each with its preset's suggested pattern stored (as UP_STORE would) */
   [[0, 0, 0, "MY LEAD"], [1, FM6_E, 1, "GLASS BELL"], [2, 2, 3, "PHASE RESO"], [5, 3, 2, "8BIT ARP"]].forEach(([slot, e, p, name]) => {
     setEngine(e); applyPreset(p);
-    if (ENG[e].presets[p].pat) loadPattern(ENG[e].presets[p].pat - 1);
+    if (eng(e).presets[p].pat) loadPattern(eng(e).presets[p].pat - 1);
     st.bank[slot] = snapshot(name);
     clearSteps(); st.p[29] = 16;
   });
@@ -2455,6 +2596,17 @@ function makeMockDevice(opt = {}) {
   const project = () => JSON.parse(JSON.stringify({ tracks: st.tracks, sel: st.sel, g: st.g, songRows: st.songRows }));
   st.slots[0] = project();
 
+  /* the plugins' engines listed after Felucca's (the ENG knob's order: by number) */
+  const pluginListed = () => [...plug.eng.keys()].filter((n) => n >= NBI).sort((x, y) => x - y);
+  /* PLUGIN_RESTART: the ports go away and come back (the page connects again); the plugins load anew */
+  function restart() {
+    st.watch = false;
+    plugBoot();
+    for (const port of [input, output]) port.state = "disconnected";
+    const ev = (port) => { if (mock.access.onstatechange) mock.access.onstatechange({ port }); };
+    ev(input); ev(output);
+    setTimeout(() => { for (const port of [input, output]) { port.state = "connected"; } ev(input); ev(output); }, opt.restartMs ?? 1500);
+  }
   function handle(cmd, a) {
     const out = [];
     const b = (x) => out.push(x & 0x7F), v = (x) => out.push(...v14enc(x)), s = (x) => out.push(...strEnc(x));
@@ -2514,7 +2666,7 @@ function makeMockDevice(opt = {}) {
             r.b();
             grid = raw.map(([h, c]) => { const x = r.b(), hit = h | (x & 1) << 7; return [hit, (c | (x & 2) << 6) & hit]; });
           } else pattern = raw.map(([n, f]) => patNorm(n, f));
-          if (slot >= NB || engine >= ENG.length || !name.length || name.length > UP.NAME_MAX || /[^\x20-\x7E]/.test(name)) rc = 1;
+          if (slot >= NB || engine >= NENG || !name.length || name.length > UP.NAME_MAX || /[^\x20-\x7E]/.test(name)) rc = 1;
           else {
             const saved = st.engine;                /* values clamped to the ranges of that engine */
             const pc = fromPerc({ engine, p }, ENG.map((x) => x.name), P_E0);   /* SAMPLE PERC: DRUM (upreset.c up_migrate) */
@@ -2530,7 +2682,7 @@ function makeMockDevice(opt = {}) {
         if (a.length < 2) return null;
         const name = new Reader(a.slice(1)).s();
         const rc = a[0] >= NB || name.length > UP.NAME_MAX ? 1 : 0;
-        if (!rc) st.bank[a[0]] = snapshot(name || `${ENG[st.engine].name} ${String(a[0] + 1).padStart(2, "0")}`);   /* (FM6: its patch) */
+        if (!rc) st.bank[a[0]] = snapshot(name || `${eng(st.engine).name} ${String(a[0] + 1).padStart(2, "0")}`);   /* (FM6: its patch) */
         b(a[0]); b(rc);
         break;
       }
@@ -2553,7 +2705,7 @@ function makeMockDevice(opt = {}) {
       }
       case CMD.UP_ERASE:
         if (a.length < 1) return null;
-        if (a[0] < NB) { st.bank[a[0]] = null; st.favorites[ENG.length][a[0]] = false; }
+        if (a[0] < NB) { st.bank[a[0]] = null; st.favorites[NENG][a[0]] = false; }
         b(a[0]); b(a[0] < NB ? 0 : 1);
         break;
       case CMD.WATCH:
@@ -2596,9 +2748,9 @@ function makeMockDevice(opt = {}) {
       case CMD.FAV_GET: case CMD.FAV_SET: {
         if (!(st.uiCaps & 8)) { b(2); break; }
         const engine = a[0], preset = v14dec(a[1], a[2]), count = a[3];
-        const limit = engine === ENG.length ? st.bank.length : engine < ENG.length ? ENG[engine].presets.length : 0;
+        const limit = engine === NENG ? st.bank.length : engine < NENG ? eng(engine).presets.length : 0;
         if (a.length !== 4 || preset < 0 || preset >= limit ||
-            (cmd === CMD.FAV_GET ? !count || count > 32 || preset + count > limit : count > 1 || engine === ENG.length && count && !st.bank[preset])) { b(1); break; }
+            (cmd === CMD.FAV_GET ? !count || count > 32 || preset + count > limit : count > 1 || engine === NENG && count && !st.bank[preset])) { b(1); break; }
         if (cmd === CMD.FAV_SET) st.favorites[engine][preset] = !!count;
         b(cmd === CMD.FAV_SET ? (opt.noFlash ? 3 : opt.deferSettings ? 4 : 0) : 0); b(engine); v(preset); b(count);
         if (cmd === CMD.FAV_GET) for (let i = 0; i < count; i++) b(!!st.favorites[engine][preset + i]);
@@ -2622,7 +2774,7 @@ function makeMockDevice(opt = {}) {
           if (a[2] >= NSTEP || !rec) rc = 1;
           else if (a[1] === 4) { if (at >= 0) m.events.splice(at, 1); }
           else {
-            const val = v14dec(a[4], a[5]), d = id >= P_E0 ? ENG[track.engine].edit[id - P_E0] : TP[id];
+            const val = v14dec(a[4], a[5]), d = id >= P_E0 ? eng(track.engine).edit[id - P_E0] : TP[id];
             if (!d || val < Math.max(-64, d.min) || val > Math.min(127, d.max)) rc = 1;
             else if (at < 0 && st.tracks.reduce((n,t) => n + t.motion.events.length, 0) >= motionMax()) rc = 2;
             else { const e = {step:a[2],param:a[3],value:val,lock:a[1] === 5}; if (at >= 0) m.events[at] = e; else m.events.push(e); }
@@ -2640,13 +2792,13 @@ function makeMockDevice(opt = {}) {
       }
       case CMD.INFO:
         s(opt.legacy ? "FELUCCA 0.4 BETA (MOCK)" : "FELUCCA v1.0 (MOCK)"); b(ENG.length); b(P_COUNT); b(G_COUNT); b(NSTEP); b(P_E0);
-        ENG.forEach((e) => s(e.name));
+        for (let i = 0; i < NBI; i++) s(eng(i).name);   /* (a plugin in a Felucca engine's place: its name) */
         if (!opt.legacy) b(NTRK);
         if (!opt.legacy && !opt.v3 && !opt.v5) {
           b(16);
           if (st.uiCaps) { b(0x55); b(1); b(st.uiCaps); b(0x4d); b(1); b(64); b(1); if (!opt.noBackup) { b(0x42); b(1); b(3); } if (!opt.noFm6) { b(0x46); b(1); b(FM6.FACTORY_PK.length); b(0); }
             if (syncCaps()) { b(0x53); b(1); b(syncCaps()); if (!opt.noFm6) { b(0x50); b(1); b(3); if (!opt.noMenu) { b(0x4E); b(1); b(MENU.length); } } if (ratchetOn()) { b(0x52); b(1); b(4); if (locksOn()) { b(0x4C); b(1); b(1);
-              if (capOn()) { b(0x41); b(1); b(0); b(1); b(0x54); b(1); b(16); if (!opt.noLanes) { b(0x57); b(1); b(NTRK); if (!opt.noVbank) { b(0x56); b(1); b(32); if (!opt.noLearn) { b(0x43); b(1); b(16); if (!opt.noCond) { b(0x4B); b(1); b(11); if (!opt.noPalette) { b(0x45); b(1); b(5); } } } } } } } } } }  /* (FM6 v2: no bank, preset
+              if (capOn()) { b(0x41); b(1); b(0); b(1); b(0x54); b(1); b(16); if (!opt.noLanes) { b(0x57); b(1); b(NTRK); if (!opt.noVbank) { b(0x56); b(1); b(32); if (!opt.noLearn) { b(0x43); b(1); b(16); if (!opt.noCond) { b(0x4B); b(1); b(11); if (!opt.noPalette) { b(0x45); b(1); b(5); if (opt.plugins) { b(0x58); b(1); b(pluginListed().length); } } } } } } } } } } }  /* (FM6 v2: no bank, preset
               patches; MENU settings; RATCH; locks; 1.2: 128 records, nudge, song lanes) */
         }
         break;
@@ -2656,7 +2808,7 @@ function makeMockDevice(opt = {}) {
         if (!d) return null;
         const arr = a[0] ? st.g : st.p;
         if (cmd === CMD.SET && a.length >= 4) {
-          if (a[0] === 1 && a[1] === G_ENGSEL) setEngine(clamp(v14dec(a[2], a[3]), 0, ENG.length - 1));
+          if (a[0] === 1 && a[1] === G_ENGSEL) { const e = clamp(v14dec(a[2], a[3]), 0, NENG - 1); if (playable(e)) setEngine(e); }
           else if (d.max > d.min) arr[a[1]] = enumOrig(d, clamp(v14dec(a[2], a[3]), d.min, d.max));
           if (!a[0] && a[1] === P_E0 + 7 && st.engine === FM6_E) fm6Slot(st.tracks[st.sel], arr[a[1]]);   /* PTCH (fm6_poll) */
         }
@@ -2689,7 +2841,7 @@ function makeMockDevice(opt = {}) {
       }
       case CMD.TRACK_PARAM: {
         if (a.length < 2 || a[0] >= NTRK || a[1] >= P_COUNT) return null;
-        const t = st.tracks[a[0]], d = a[1] >= P_E0 ? ENG[t.engine].edit[a[1] - P_E0] : TP[a[1]];
+        const t = st.tracks[a[0]], d = a[1] >= P_E0 ? eng(t.engine).edit[a[1] - P_E0] : TP[a[1]];
         if (a.length >= 4 && d.max > d.min) t.p[a[1]] = enumOrig(d, clamp(v14dec(a[2], a[3]), d.min, d.max));
         b(a[0]); b(a[1]); v(t.p[a[1]]);
         break;
@@ -2819,11 +2971,11 @@ function makeMockDevice(opt = {}) {
         break;
       }
       case CMD.PRESET:
-        if (a.length < 2 || a[0] >= ENG.length) return null;
+        if (a.length < 2 || a[0] >= NENG) return null;
         if (a[0] === 1) fm4Load(a[1]);              /* a DIGITAL preset: its sound, as FM6 */
         else {
-          if (a[0] !== st.engine) setEngine(a[0]);
-          applyPreset(a[1]);
+          if (a[0] !== st.engine && playable(a[0])) setEngine(a[0]);
+          if (a[0] === st.engine) applyPreset(a[1]);
         }
         b(st.engine); b(st.preset);
         break;
@@ -2867,16 +3019,16 @@ function makeMockDevice(opt = {}) {
           st.tracks.forEach((t) => {
             const pc = fromPerc({ engine: t.engine, p: t.p }, ENG.map((x) => x.name), P_E0);
             if (pc) { t.engine = pc.engine; t.p = pc.p; t.preset = 0; }
-            if (t.preset >= ENG[t.engine].presets.length) t.preset = 0;
+            if (t.preset >= eng(t.engine).presets.length) t.preset = 0;
           });
         }
         b(a[0]); b(k); b(st.slots[k] ? 1 : 0);
         break;
       }
       case CMD.NAMES:
-        if (a.length < 1 || a[0] >= ENG.length) return null;
-        b(a[0]); b(ENG[a[0]].presets.length); ENG[a[0]].presets.forEach((p) => s(p.name));
-        ENG[a[0]].titles.forEach(s);
+        if (a.length < 1 || a[0] >= NENG) return null;
+        b(a[0]); b(eng(a[0]).presets.length); eng(a[0]).presets.forEach((p) => s(p.name));
+        eng(a[0]).titles.forEach(s);
         break;
       /* user sample slots: the header is checked like the firmware's ed_smp_end() */
       case CMD.SMP_BEGIN: case CMD.SMP_ERASE: {
@@ -2967,6 +3119,48 @@ function makeMockDevice(opt = {}) {
         b(op); b(id); b(rc);
         break;
       }
+      case CMD.PLUGIN_INFO: case CMD.PLUGIN_ERASE: case CMD.PLUGIN_WRITE: case CMD.PLUGIN_REG: case CMD.PLUGIN_RESTART:
+      case CMD.PLUGIN_ENGINES: {                    /* editor_plugin.c */
+        if (!opt.plugins) return null;
+        if (cmd === CMD.PLUGIN_ENGINES) { const l = pluginListed(); b(l.length); l.forEach((n) => { b(n); s(eng(n).name.slice(0, 8)); }); break; }
+        if (opt.pluginNoFlash) { b(1); break; }
+        if (cmd === CMD.PLUGIN_INFO) {
+          b(PLUGIN.ABI); b(PLUGIN.NSLOT);
+          for (let k = 0; k < PLUGIN.NSLOT; k++) {
+            const h = readFep(plug.flash[k]), good = plug.state[k] !== 0 && plug.state[k] !== 2;
+            b(plug.state[k]); u32(good ? h.id : 0); u32(good ? h.version : 0);
+            b(plug.state[k] === 1 ? plug.no[k] : good && h.engine < 127 ? h.engine : 127); s(good ? h.name : "");
+          }
+          b(plug.reg.length); plug.reg.forEach((id, i) => { b(i); u32(id); });
+        } else if (cmd === CMD.PLUGIN_ERASE) {
+          const k = a.length === 1 ? a[0] : PLUGIN.NSLOT;
+          b(k);
+          if (k >= PLUGIN.NSLOT) { b(1); break; }
+          if (plug.state[k] === 1) plug.eng.delete(plug.no[k]);   /* (its number plays what it did before) */
+          plug.flash[k].fill(0xFF); plug.state[k] = 0; plug.no[k] = PLUGIN.OWN;
+          b(0);
+        } else if (cmd === CMD.PLUGIN_WRITE) {
+          const k = a.length >= 5 ? a[0] : PLUGIN.NSLOT, off = a.length >= 5 ? a[1] | a[2] << 7 | a[3] << 14 : 0;
+          const d = a.length > 4 ? unpack7(a.slice(4)).slice(0, 256) : [];
+          let rc = 0;
+          if (k >= PLUGIN.NSLOT || !d.length || off & 0xFF || off + d.length > PLUGIN.SLOT_SIZE[k]) rc = 1;
+          else if (plug.state[k] === 1) rc = 3;
+          else if (d.some((x, i) => ((off + i) & 0xFFF) === 0xF06 && x === 0x41 && d[i + 1] === 0x54)) rc = 5;
+          else d.forEach((x, i) => { plug.flash[k][off + i] &= x; });   /* (flash: bits only cleared) */
+          b(k); b(off); b(off >> 7); b(off >> 14); b(rc);
+        } else if (cmd === CMD.PLUGIN_REG) {
+          const id = a.length === 5 ? (a[0] | a[1] << 7 | a[2] << 14 | a[3] << 21 | a[4] << 28) >>> 0 : 0;
+          let k = plug.reg.indexOf(id), rc = 0;
+          if (a.length !== 5 || id === 0xFFFFFFFF || !pluginIdOk(id)) { k = 0; rc = 1; }
+          else if (k < 0 && plug.reg.length >= PLUGIN.UNKNOWN - PLUGIN.PLUG0) { k = 0; rc = 4; }   /* (the last: UNKNOWN's) */
+          else if (k < 0) { k = plug.reg.length; plug.reg.push(id); }
+          b(k); b(rc);
+        } else {                                    /* RESTART: the reply, then the FM-1 leaves the bus and comes back */
+          b(0);
+          setTimeout(restart, 300);
+        }
+        break;
+      }
       case CMD.SMP_INFO:
         b(3); b(SMP.SLOT_SIZE / 1024);
         st.smp.forEach((u) => { b(u.zones); s(u.zones ? u.name : ""); b(u.zones ? Math.ceil(u.len / 1024) : 0); });
@@ -3004,6 +3198,7 @@ function makeMockDevice(opt = {}) {
     send(data) {
       const f = unframe(data);
       if (!f) { console.error("mock: refused a frame that is not F0 7D 46 4C ... F7", data); return; }
+      if (output.state !== "connected") return;     /* (restarting: off the bus) */
       if (busy) { console.warn("mock: frame dropped (device holds only one frame)", data); return; }
       busy = true;
       watching();                                   /* a lapsed WATCH ends before this request counts */
@@ -3060,7 +3255,7 @@ function makeMockDevice(opt = {}) {
     mute(on = !st.p[40]) { st.p[40] = on ? 1 : 0; push(CMD.CHANGED, [0, 40, ...v14enc(st.p[40])]); return st.p[40]; },
     /* a parameter of track i changed on the device: CHANGED for the selected track, else TRACK_CHANGED (v4 watch) */
     param(i, id, val) {
-      const t = st.tracks[i], d = id >= P_E0 ? ENG[t.engine].edit[id - P_E0] : TP[id];
+      const t = st.tracks[i], d = id >= P_E0 ? eng(t.engine).edit[id - P_E0] : TP[id];
       t.p[id] = clamp(val, d.min, d.max);
       if (i === st.sel) push(CMD.CHANGED, [0, id, ...v14enc(t.p[id])]);
       else if (st.v4) push(CMD.TRACK_CHANGED, [i, id, ...v14enc(t.p[id])]);
@@ -3083,13 +3278,14 @@ function makeMockDevice(opt = {}) {
     setInterval(() => sim.reload(), 27000),
     setInterval(() => sim.param((st.sel + 1) % NTRK, 39, Math.round(Math.random() * 80) - 40), 13000),   /* pan of another track */
   ];
-  return {
-    state: st, sim,
+  const mock = {
+    state: st, sim, plugins: plug,
     tables: { TP, GP, ENG, PATTERNS, P_COUNT, G_COUNT, NSTEP, P_E0, G_ENGSEL, P_SLCR, NTRK, MENU,
       FM6: { bank: 0, own: FM6_OWN, init: FM6.INIT_PK, factory: FM6.FACTORY_PK } },   /* test_web.mjs: == the firmware */
     stop: () => timers.forEach(clearInterval),
     access: { sysexEnabled: true, inputs: new Map([[input.id, input]]), outputs: new Map([[output.id, output]]), onstatechange: null },
   };
+  return mock;
 }
 /* Optional preferences: old firmware is never probed with unknown commands. */
 async function readDevicePreferences(rq, info, names, previous = null, fresh = false) {
@@ -3101,8 +3297,10 @@ async function readDevicePreferences(rq, info, names, previous = null, fresh = f
     if (!previous || state.bankSig !== previous.state.bankSig) slots = await bank.list(rq);
     if (!previous || state.favoriteSig !== previous.state.favoriteSig || state.bankSig !== previous.state.bankSig) {
       favorites = [];
-      for (let engine = 0; engine <= info.nengines; engine++) {
-        const total = engine === info.nengines ? slots.total : (names[engine] || []).length;
+      const user = info.userEngine ?? info.nengines;   /* (1.9 with plugins: 96, not INFO's count) */
+      const listed = (info.engines || []).map((x, i) => i).filter((i) => i >= info.nengines && i !== user);   /* (plugins' engines) */
+      for (const engine of [...Array(info.nengines).keys(), ...listed, user]) {
+        const total = engine === user ? slots.total : (names[engine] || []).length;
         const flags = favorites[engine] = [];
         for (let start = 0; start < total; start += 32) {
           const count = Math.min(32, total - start);
@@ -3144,9 +3342,10 @@ function enumShown(d) {
 const ENGINE_ORDER = ["ANALOG", "FM6", "DIGITAL", "PHASE", "LOFI", "SAMPLE", "VOICE", "TRIO", "WHEEL", "GRAIN", "PHYS", "NOISE",
   "SLICE", "DRUM"];
 function engineOrder(names) {
-  const rank = (n) => { const k = ENGINE_ORDER.indexOf(n); return k < 0 ? ENGINE_ORDER.length : k; };
-  return (names || []).map((n, i) => i).filter((i) => names[i] !== "-")
-    .sort((a, b) => rank(names[a]) - rank(names[b]) || a - b);
+  /* (1.9: the plugins' own numbers, 32 .., after Felucca's by number, whatever their names: eng_order) */
+  const rank = (i) => { const k = ENGINE_ORDER.indexOf(names[i]); return i >= PLUGIN.PLUG0 ? ENGINE_ORDER.length + 1 : k < 0 ? ENGINE_ORDER.length : k; };
+  return (names || []).map((n, i) => i).filter((i) => names[i] != null && names[i] !== "-")
+    .sort((a, b) => rank(a) - rank(b) || a - b);
 }
 
 function devicePresetRows(info, names, preferences) {
@@ -3154,13 +3353,13 @@ function devicePresetRows(info, names, preferences) {
   const rows = engineOrder(info.engines).filter((engine) => names[engine]).flatMap((engine) => names[engine]
     .map((name, preset) => ({ engine, preset, name, user: false })).filter((row) => aliasOf(names[engine], row.preset) === row.preset));
   for (const slot of preferences.slots.slots) if (slot.used)
-    rows.push({ engine: info.nengines, preset: slot.slot, name: slot.name, user: true });
+    rows.push({ engine: info.userEngine ?? info.nengines, preset: slot.slot, name: slot.name, user: true });
   return rows.map((row) => ({ ...row, favorite: !!(preferences.favorites[row.engine] || [])[row.preset] }))
     .filter((row) => !preferences.state.filter || row.favorite);
 }
 
 /*PROTO-END*/
-  return { HDR, CMD, PUSH, UP, F, v14enc, v14dec, strEnc, frame, unframe, LANES, LANE_NOTE, LANE_OF, LANE_ALIAS, drumLane, stepLanes, stepAccents, hitsText, parseHits, hitsEnc, readHits, Reader, parse, upName, req, replyMatches, Link, NOTE_NAMES, noteName, parseNote, parseNotes, fmtValue, SMP, pack7, unpack7, CRC_TABLE, crc32, IMA_STEP, IMA_IDX, imaEncode, parseWav, resample, pyRound, normalize, FADE, takeSample, zoomView, autoTrim, rootFromName, buildSlot, LIB, paramKeys, sameKeys, remapParams, tailParams, patNorm, patternFromSteps, stepsFromPattern, patternUsed, gridFromSteps, cleanPatch, libraryFile, readLibraryFile, FLASH_OPT, bank, capturePatch, TRACK_OWN, P_CHORD, P_LANES, trackOwn, auditionPatch, startWatch, mixer, FM6, fm6Bank, midiLearn, PAL_ROLES, PAL_BUILTIN, palLuma, PAL_RULE, palUnreadable, palReadable, FM4, CATEGORIES, STEP_CONDS, fromDigital, reservedFm4, PERC_SET, fromPerc, engineLabel, makeMockDevice, parseMotionAll, readDevicePreferences, aliasOf, divLength, enumShown, ENGINE_ORDER, engineOrder, devicePresetRows, MENU, MENU_TABS, readDeviceMenu };
+  return { HDR, CMD, PUSH, UP, F, v14enc, v14dec, strEnc, frame, unframe, LANES, LANE_NOTE, LANE_OF, LANE_ALIAS, drumLane, stepLanes, stepAccents, hitsText, parseHits, hitsEnc, readHits, Reader, parse, upName, req, replyMatches, Link, NOTE_NAMES, noteName, parseNote, parseNotes, fmtValue, SMP, pack7, unpack7, CRC_TABLE, crc32, IMA_STEP, IMA_IDX, imaEncode, parseWav, resample, pyRound, normalize, FADE, takeSample, zoomView, autoTrim, rootFromName, buildSlot, LIB, paramKeys, sameKeys, remapParams, tailParams, patNorm, patternFromSteps, stepsFromPattern, patternUsed, gridFromSteps, cleanPatch, libraryFile, readLibraryFile, FLASH_OPT, bank, capturePatch, TRACK_OWN, P_CHORD, P_LANES, trackOwn, auditionPatch, startWatch, mixer, FM6, fm6Bank, midiLearn, PAL_ROLES, PAL_BUILTIN, palLuma, PAL_RULE, palUnreadable, palReadable, FM4, CATEGORIES, STEP_CONDS, fromDigital, reservedFm4, PERC_SET, fromPerc, engineLabel, makeMockDevice, parseMotionAll, readDevicePreferences, aliasOf, divLength, enumShown, ENGINE_ORDER, engineOrder, devicePresetRows, MENU, MENU_TABS, readDeviceMenu, PLUGIN, pluginXip, u32enc, pluginIdText, pluginIdOk, readFep, makeFep, NO_PLUGIN, engineNameOf, isPluginNo };
 })();
 /* ---- fm1backup.js ---- */
 const __m1 = (() => {
@@ -3408,7 +3607,7 @@ class BackupConnection {
 /* ---- device.js ---- */
 const __m2 = (() => {
   const { captureBackup, captureObject, conditionalProjects, projectFile, putObject, readBackup, readProject, restoreBackup } = __m1;
-  const { CMD, F, FLASH_OPT, FM6, fm6Bank, midiLearn, Link, parseMotionAll, P_CHORD, SMP, auditionPatch, bank, capturePatch, fromDigital, mixer, parse, paramKeys, readDeviceMenu, readDevicePreferences, req, reservedFm4, startWatch, upName } = __m0;
+  const { CMD, F, FLASH_OPT, FM6, fm6Bank, midiLearn, Link, parseMotionAll, P_CHORD, PLUGIN, SMP, auditionPatch, bank, capturePatch, engineNameOf, fromDigital, isPluginNo, mixer, parse, paramKeys, readDeviceMenu, readDevicePreferences, readFep, req, reservedFm4, startWatch, upName } = __m0;
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 Leo Kuroshita (@kurogedelic), Hügelton Instruments
 //
@@ -3439,7 +3638,7 @@ class Device {
     this.info = null; this.pdesc = []; this.gdesc = []; this.names = []; this.titles = [];
     this.dump = null; this.steps = []; this.slotUsed = [null, null, null, null]; this.smp = null; this.keys = null;
     this.watch = false; this.v4 = false; this.bank = null; this.sel = 0; this.mix = null; this.song = null;
-    this.motion = null; this.preferences = null; this.fm6 = null; this.menu = null;
+    this.motion = null; this.preferences = null; this.fm6 = null; this.menu = null; this.plugins = null;
     this.busy = 0; this.busyEpoch = 0; this.closed = false; this.loaded = false;
     this.needReload = false; this.lastDump = 0; this.rewatch = false; this.stepRR = 0;
     this.selfReload = { n: 0, until: 0 };
@@ -3514,10 +3713,12 @@ class Device {
       this.emit("progress", { what: "info", info: i });
       for (let k = 0; k < i.pcount; k++) { this.emit("progress", { what: "desc", n: k + 1, total }); this.pdesc[k] = await this.descOrNull(0, k); }
       for (let k = 0; k < i.gcount; k++) { this.emit("progress", { what: "desc", n: i.pcount + k + 1, total }); this.gdesc[k] = await this.descOrNull(1, k); }
-      for (let e = 0; e < i.nengines; e++) {
+      if (i.plugins != null) await this.readPluginEngines();   /* (1.9: the plugins' engines join INFO's, by number) */
+      for (const e of this.engineNos()) {
         const r = parse[CMD.NAMES](await this.rq(req.names(e)));
         this.names[e] = r.names; this.titles[e] = r.titles;
       }
+      if (i.plugins != null) await this.readPlugins();
       for (let k = 0; k < 4; k++) {                  /* PROJECT op 2: is the slot used */
         try { this.slotUsed[k] = parse[CMD.PROJECT](await this.rq(req.project(2, k))).used; } catch (e) { if (e.message === "closed") throw e; }
       }
@@ -3612,7 +3813,9 @@ class Device {
   muteId() { return this.pId("MUTE", 40); }
   revId() { return this.pId("REV", 36); }
   pSlen() { const k = this.pdesc.findIndex((d) => d && d.fmt === F.STEPS); return k >= 0 ? k : P.SLEN; }
-  engineName() { return this.info && this.dump ? this.info.engines[this.dump.engine] : ""; }
+  engineName() { return this.info && this.dump ? engineNameOf(this.info, this.dump.engine) : ""; }
+  /* the engine numbers this device plays: Felucca's (INFO), then the plugins' listed (1.9) */
+  engineNos() { return this.info.engines.map((x, n) => n).filter((n) => n != null); }
 
   touched(k) { return this.now() - (this.touchedAt.get(k) || 0) < 600 || (this.link && this.link.hasQueued(k)); }
 
@@ -3731,7 +3934,12 @@ class Device {
 
   /* ---- sounds: the user bank (UP_*), audition, capture, favourites (editor.html's library half) ---- */
   /* a sound the device can take: its engine is this device's (by number and name) */
-  engineOk(p) { return p.engine < this.info.nengines && (!p.engineName || this.info.engines[p.engine] === p.engineName); }
+  /* (a plugin's engine: a number this device lists now, by the same name: numbers of plugins of their own are each
+     device's own) */
+  engineOk(p) {
+    const listed = p.engine < this.info.nengines || (isPluginNo(this.info, p.engine) && this.info.engines[p.engine] != null);
+    return listed && (!p.engineName || this.info.engines[p.engine] === p.engineName);
+  }
   /* a full parameter set for UP_PUT: unknown values get the DESC default where it is known, else 0 */
   fullParams(p) {
     const out = [];
@@ -4005,6 +4213,95 @@ class Device {
       if (r.rc) { const e = new Error(`fm6 rc ${r.rc}`); e.code = "fm6"; e.rc = r.rc; throw e; }
       return true;
     } catch (e) { if (e.message !== "closed") this.emit("error", e); return false; }
+  }
+
+  /* ---- plugin engines (1.9, INFO 58 01 n: cmds 82..87; EDITOR_PROTOCOL.md "Plugin engines") ---- */
+  pluginOk() { return !!(this.info && this.info.plugins != null); }
+  /* PLUGIN_ENGINES: the plugins' engines put into info.engines at their numbers (INFO lists Felucca's only); a number
+     no longer listed goes (it plays NO PLUGIN now) */
+  async readPluginEngines() {
+    const i = this.info, list = parse[CMD.PLUGIN_ENGINES](await this.rq(req.pluginEngines()));
+    for (let n = i.nengines; n < i.engines.length; n++) delete i.engines[n];
+    for (const x of list) if (x.no >= i.nengines && x.no < PLUGIN.NENGINES) i.engines[x.no] = x.name;
+    i.engines.length = Math.max(i.nengines, ...list.map((x) => x.no + 1).filter((n) => n <= PLUGIN.NENGINES));
+    i.plugins = list.length;
+    return list;
+  }
+  /* the engines again (a plugin taken out: a number plays Felucca's engine again, or NO PLUGIN): INFO's names, the
+     plugins', their presets, the selected track's engine page */
+  async refreshEngines() {
+    const fresh = parse[CMD.INFO](await this.rq(req.info()));
+    for (let n = 0; n < this.info.nengines; n++) this.info.engines[n] = fresh.engines[n];
+    await this.readPluginEngines();
+    this.names.length = this.titles.length = 0;
+    for (const e of this.engineNos()) {
+      const r = parse[CMD.NAMES](await this.rq(req.names(e)));
+      this.names[e] = r.names; this.titles[e] = r.titles;
+    }
+    this.dump = await this.readDump();
+    await this.rereadEngineDesc();
+    if (this.info.ntrk) await this.readMixer();
+    this.emit("reload", this);
+  }
+  /* PLUGIN_INFO -> this.plugins {abi, slots: [{slot, state, id, version, no, name}], given: [{no, id}]}, or null (a
+     build without the plugin flash: rc 1) */
+  async readPlugins() {
+    if (!this.pluginOk()) { this.plugins = null; return null; }
+    try {
+      const r = parse[CMD.PLUGIN_INFO](await this.rq(req.pluginInfo()));
+      this.plugins = r.rc || !r.slots.length ? null : r;
+    } catch (e) { if (e.message === "closed") throw e; this.plugins = null; }
+    this.emit("plugins", this.plugins);
+    return this.plugins;
+  }
+  pluginsRefresh() { return this.op(() => this.readPlugins()); }
+  pluginFail(what, rc) { const e = new Error(`plugin ${what} rc ${rc}`); e.code = "plugin"; e.what = what; e.rc = rc; throw e; }
+  /* a .fep file (bytes) into the slot it is linked for (tools/fm1_plugin.py install): its header checked (proto.js
+     readFep; code "fep" and the reason), a plugin of its own (engine NEW) its number first (REG), the slot erased,
+     written a page at a time; it plays from the restart (pluginRestart). onProgress(bytes done, bytes).
+     -> {slot, no (its number, null: Felucca's it takes the place of), fep} */
+  pluginInstall(bytes, onProgress) {
+    const fep = readFep(bytes);
+    if (!fep.ok) { const e = new Error(`fep ${fep.error}`); e.code = "fep"; e.why = fep.error; e.fep = fep; return Promise.reject(e); }
+    const b = bytes instanceof Uint8Array ? bytes : Uint8Array.from(bytes), k = fep.slot;
+    return this.op(async () => {
+      try {
+        let no = fep.engine === PLUGIN.NEW ? null : fep.engine;
+        if (fep.engine === PLUGIN.NEW) {
+          const r = parse[CMD.PLUGIN_REG](await this.rq(req.pluginReg(fep.id), FLASH_OPT));
+          if (r.rc) this.pluginFail("reg", r.rc);
+          no = r.no;
+        }
+        const er = parse[CMD.PLUGIN_ERASE](await this.rq(req.pluginErase(k), { timeout: 5000, retries: 0 }));
+        if (er.rc) this.pluginFail("erase", er.rc);
+        for (let off = 0; off < b.length; off += PLUGIN.PAGE) {
+          const w = parse[CMD.PLUGIN_WRITE](await this.rq(req.pluginWrite(k, off, b.subarray(off, off + PLUGIN.PAGE)), { timeout: 1000, retries: 1 }));
+          if (w.rc) this.pluginFail("write", w.rc);
+          if (onProgress) onProgress(Math.min(b.length, off + PLUGIN.PAGE), b.length);
+        }
+        return { slot: k, no, fep };
+      } finally { try { await this.readPlugins(); } catch { /* shown by the next action */ } }
+    });
+  }
+  /* slot k emptied (its number plays what it played before: Felucca's engine, or NO PLUGIN); the numbers stay given */
+  pluginErase(k) {
+    return this.op(async () => {
+      try {
+        const r = parse[CMD.PLUGIN_ERASE](await this.rq(req.pluginErase(k), { timeout: 5000, retries: 0 }));
+        if (r.rc) this.pluginFail("erase", r.rc);
+        await this.refreshEngines();
+        return true;
+      } finally { try { await this.readPlugins(); } catch { /* ignore */ } }
+    });
+  }
+  /* the FM-1 restarts (plugins load at power-on): this connection ends ("restart"), the page connects again */
+  pluginRestart() {
+    return this.op(async () => {
+      const r = parse[CMD.PLUGIN_RESTART](await this.rq(req.pluginRestart()));
+      if (r.rc) this.pluginFail("restart", r.rc);
+      this.close("restart");
+      return true;
+    });
   }
 
   /* ---- user sample slots (SMP_*) ---- */
@@ -4774,6 +5071,16 @@ const TEXT = {
     bankKept: "The FM-1 keeps its previous bank", bankRc1: "refused", bankRc2: "a checksum error: send it again", bankRc3: "stop the playback, then send it again",
     bankRc4: "a flash error", bankRc5: "the transfer was ended: send it again", tryIt: "Try in browser", tryNext: "Try the next version", usbQ: "Switch USB SERIAL? USB drops for a moment.", afterRestart: "Takes effect after restart", usb: "USB is switching; connecting again",
     didLoad: "Loaded {0}", didKeep: "Kept {0}", didSave: "Saved to {0}", didRestore: "Restored {0}", isEmpty: "{0} empty",
+    plugins: "Plugins", plgInstall: "Install", plgRestart: "Restart", plgReread: "Read again", plgVersion: "Version", plgGiven: "Numbers given",
+    plgOwn: "a number of its own", plgReplaces: "in place of {0}", plgPending: "Written: plays after a restart",
+    plgNone: "This firmware has no plugin slots", plgNoFlash: "The plugin slots are not available on this build",
+    plgSt0: "EMPTY", plgSt1: "PLAYING", plgSt2: "NOT A GOOD FILE", plgSt3: "REFUSED", plgSt4: "SKIPPED AFTER A CRASH", plgSt5: "NO NUMBER",
+    plgRc1: "refused", plgRc2: "a flash error", plgRc3: "the slot is playing: erase it first", plgRc4: "no numbers left", plgRc5: "a sector mark in the data: pack it again",
+    fep_short: "Too short for a plugin file", fep_magic: "Not a plugin file (.fep)", fep_header: "An unknown header version", fep_platform: "For another device",
+    fep_abi: "For another plugin interface: update the FM-1 or the plugin", fep_slot: "Linked for no slot here", fep_size: "Too large for its slot",
+    fep_link: "Not linked for its slot", fep_crc: "Damaged (CRC)", fep_id: "Its id is not four printable characters", fep_mark: "A sector mark in the data: pack it again",
+    plgInstallQ: "Install {0} into SLOT {1}?", plgOverQ: "Install {0} into SLOT {1}? It replaces {2}.", plgEraseQ: "Erase SLOT {0} ({1})?",
+    plgRestartQ: "Restart the FM-1? USB drops for a moment.", didInstall: "{0} written to SLOT {1}", restart: "The FM-1 is restarting; connecting again",
     didSend: "Sent to {0}", didImport: "Imported {0}", skippedN: "{0} skipped",
   },
   ja: {
@@ -4810,6 +5117,16 @@ const TEXT = {
     bankKept: "FM-1 は前のバンクのままです", bankRc1: "受け付けられませんでした", bankRc2: "チェックサムが合いません。もう一度送ってください", bankRc3: "再生を止めてから、もう一度送ってください",
     bankRc4: "フラッシュの書き込みエラー", bankRc5: "転送が終わってしまいました。もう一度送ってください", tryIt: "ブラウザで試す", tryNext: "次の版を試す", usbQ: "USB SERIAL を切り替えますか？ USB が一度切れます。", afterRestart: "再起動後に有効になります", usb: "USB を切り替え中、つなぎ直します",
     didLoad: "{0} を読み込みました", didKeep: "{0} をライブラリに追加", didSave: "{0} に保存しました", didRestore: "{0} から復元しました", isEmpty: "{0} は空",
+    plugins: "プラグイン", plgInstall: "インストール", plgRestart: "再起動", plgReread: "読み直す", plgVersion: "バージョン", plgGiven: "割り当て済みの番号",
+    plgOwn: "専用の番号", plgReplaces: "{0} の代わり", plgPending: "書き込み済み：再起動後に使えます",
+    plgNone: "このファームウェアにはプラグインのスロットがありません", plgNoFlash: "このビルドではプラグインのスロットが使えません",
+    plgSt0: "空き", plgSt1: "使用中", plgSt2: "正しくないファイル", plgSt3: "拒否", plgSt4: "クラッシュのため停止中", plgSt5: "番号なし",
+    plgRc1: "拒否されました", plgRc2: "フラッシュの書き込みエラー", plgRc3: "スロットが使用中です。先に消去してください", plgRc4: "番号が残っていません", plgRc5: "データにセクタの印が入ります。パックし直してください",
+    fep_short: "プラグインのファイルとしては短すぎます", fep_magic: "プラグインのファイル (.fep) ではありません", fep_header: "未知のヘッダー版です", fep_platform: "別の機種向けです",
+    fep_abi: "別のプラグイン仕様向けです。FM-1 かプラグインを更新してください", fep_slot: "ここにないスロット向けです", fep_size: "スロットに収まりません",
+    fep_link: "スロット向けにリンクされていません", fep_crc: "壊れています (CRC)", fep_id: "ID が印字可能な 4 文字ではありません", fep_mark: "データにセクタの印が入ります。パックし直してください",
+    plgInstallQ: "{0} を SLOT {1} にインストールしますか？", plgOverQ: "{0} を SLOT {1} にインストールしますか？ {2} は置き換わります。", plgEraseQ: "SLOT {0}（{1}）を消去しますか？",
+    plgRestartQ: "FM-1 を再起動しますか？ USB が一度切れます。", didInstall: "{0} を SLOT {1} に書き込みました", restart: "FM-1 を再起動しています。接続し直します",
     didSend: "{0} へ送りました", didImport: "{0} 件取り込み", skippedN: "{0} 件スキップ",
   },
 };
@@ -5343,7 +5660,7 @@ function paramIcon(d, v, engine) {
 })();
 /* ---- sound.js ---- */
 const __m10 = (() => {
-  const { F, aliasOf, engineOrder } = __m0;
+  const { F, aliasOf, engineNameOf, engineOrder } = __m0;
   const { ENGINE_IC, el, ic, store } = __m4;
   const { fm6Screen } = __m7;
   const { G_SKIP, HEAD_IC, LAYOUT, paramIcon, visible } = __m9;
@@ -5429,11 +5746,13 @@ function soundScreen(root, ui) {
 
   /* ---- the voice: engine, preset, prev / next, init ---- */
   function voice() {
-    const e = dev.dump.engine, names = dev.names[e] || [], eng = dev.info.engines[e] || "";
+    const e = dev.dump.engine, names = dev.names[e] || [], eng = engineNameOf(dev.info, e);
     const shown = names.map((_, i) => i).filter((i) => aliasOf(names, i) === i);
     const at = Math.max(0, shown.indexOf(aliasOf(names, dev.dump.preset)));
     const engSel = el("select", { "aria-label": t("engine") },
-      ...engineOrder(dev.info.engines).map((i) => el("option", { value: i, text: dev.info.engines[i] })));
+      ...engineOrder(dev.info.engines).map((i) => el("option", { value: i, text: dev.info.engines[i] })),
+      /* (a number no engine here plays: a plugin this device lacks, NO PLUGIN; shown, not offered) */
+      dev.info.engines[e] == null ? el("option", { value: e, text: eng, disabled: true }) : null);
     engSel.value = String(e);
     engSel.addEventListener("change", () => dev.loadPreset(+engSel.value, 0));
     const preSel = el("select", { "aria-label": t("preset") }, ...shown.map((i) => el("option", { value: i, text: names[i] })));
@@ -5455,7 +5774,7 @@ function soundScreen(root, ui) {
 
   /* ---- a group: one card, pages as cells ---- */
   function group(g) {
-    const eng = dev.info.engines[dev.dump.engine] || "";
+    const eng = engineNameOf(dev.info, dev.dump.engine);
     const title = g.engine ? eng || "EDIT" : g.t;
     if (g.mod != null) {
       const body = [];
@@ -5900,7 +6219,7 @@ function seqScreen(root, ui) {
 })();
 /* ---- mix.js ---- */
 const __m13 = (() => {
-  const { F, fmtValue } = __m0;
+  const { F, engineNameOf, fmtValue } = __m0;
   const { el, ic, put } = __m4;
   const { help, paramRow } = __m5;
   const { t } = __m6;
@@ -5961,7 +6280,7 @@ function mixScreen(root) {
       el: box,
       update() {
         const y = x(), sel = k === dev.sel;
-        const name = [dev.info.engines[y.engine], (dev.names[y.engine] || [])[y.preset]].filter(Boolean).join(" ");
+        const name = [engineNameOf(dev.info, y.engine), (dev.names[y.engine] || [])[y.preset]].filter(Boolean).join(" ");
         box.classList.toggle("sel", sel);
         box.classList.toggle("muted", !!y.mute);
         box.setAttribute("aria-label", `${t("track")} ${k + 1}${name ? ": " + name : ""}`);
@@ -6174,7 +6493,7 @@ const today = () => new Date().toISOString().slice(0, 10);
 })();
 /* ---- libview.js ---- */
 const __m15 = (() => {
-  const { CATEGORIES, devicePresetRows, engineLabel, engineOrder } = __m0;
+  const { CATEGORIES, devicePresetRows, engineLabel, engineNameOf, engineOrder } = __m0;
   const { $$, ENGINE_IC, el, ic } = __m4;
   const { SORTS, fileSlug, slotName, today } = __m14;
   const { card, cells, help } = __m5;
@@ -6256,7 +6575,7 @@ function libraryScreen(root, ui, lib) {
     const load = (k) => { const r = rows.find((x) => key(x) === k); if (!r || busy) return; run(() => (r.user ? dev.bankLoad(r.preset) : dev.loadPreset(r.engine, r.preset)), () => ui.say(tf("didLoad", r.name))); };
     const items = rows.map((r) => ({
       key: key(r), name: r.name,
-      cells: [el("span", { class: "tag", text: r.user ? slotName(r.preset) : dev.info.engines[r.engine] }), el("span", { text: r.name }),
+      cells: [el("span", { class: "tag", text: r.user ? slotName(r.preset) : engineNameOf(dev.info, r.engine) }), el("span", { text: r.name }),
         el("span", { class: "rowacts" },
           r.user ? null : el("button", { type: "button", class: "iconbtn sm", "aria-label": `${t("keep")}: ${r.name}`, disabled: busy,
             onclick: (e) => { e.stopPropagation(); run(() => dev.captureFactory(r.engine, r.preset), async (pt) => { if (pt) { await lib.add([pt]); ui.say(tf("didKeep", pt.name)); } }); } }, ic("symbol_download_as")),
@@ -6274,7 +6593,7 @@ function libraryScreen(root, ui, lib) {
   /* ---- LIBRARY: in this browser ---- */
   function library() {
     const v = lib.view(view), sel = lib.get(libSel);
-    const all = [...new Set([...(dev ? dev.info.engines : lib.meta.engines || []), ...lib.patches.map((p) => p.engineName).filter(Boolean)])].filter((x) => x !== "-");
+    const all = [...new Set([...(dev ? dev.info.engines : lib.meta.engines || []), ...lib.patches.map((p) => p.engineName)])].filter((x) => x && x !== "-");   /* (1.9: plugins' numbers leave holes) */
     const engs = engineOrder(all).map((i) => all[i]);
     const audition = (id) => {
       const p = lib.get(id);
@@ -6331,7 +6650,7 @@ function libraryScreen(root, ui, lib) {
       el("div", { class: "acts wrap" },
         btn("symbol_download_as", t("keep"), async () => {
           if (!dev) return;
-          const def = (dev.names[dev.dump.engine] || [])[dev.dump.preset] || dev.info.engines[dev.dump.engine];
+          const def = (dev.names[dev.dump.engine] || [])[dev.dump.preset] || engineNameOf(dev.info, dev.dump.engine);
           const name = await ui.ask(t("keep"), def);
           if (name == null) return;
           run(() => dev.capture(name.trim() || def), async (pt) => { if (pt) { await lib.add([pt]); ui.say(tf("didKeep", pt.name)); } });
@@ -6881,8 +7200,152 @@ function samplesScreen(root, ui) {
 }
   return { samplesScreen };
 })();
-/* ---- project.js ---- */
+/* ---- plugview.js ---- */
 const __m18 = (() => {
+  const { PLUGIN, engineNameOf, readFep } = __m0;
+  const { el, ic } = __m4;
+  const { card } = __m5;
+  const { t, tf } = __m6;
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Leo Kuroshita (@kurogedelic), Hügelton Instruments
+//
+// PLUGINS: the FM-1's two plugin engine slots (firmware 1.9 built with plugins: INFO 58 01 n). Each shows what it
+// holds and its state; a .fep file (chosen or dropped) is checked as the device's loader checks it, then INSTALL
+// writes it into the slot it is linked for. A plugin plays from the next power-on: RESTART.
+
+
+
+
+
+
+const kib = (n) => (n / 1024).toFixed(1);
+const hex = (v) => (v >>> 0).toString(16).toUpperCase().padStart(8, "0");
+const idOf = (id) => { const s = [24, 16, 8, 0].map((k) => (id >>> k) & 0xFF); return s.every((c) => c >= 32 && c < 127) ? String.fromCharCode(...s) : hex(id); };
+
+function pluginsScreen(root, ui) {
+  let dev = null, busy = false, draft = null, pending = [false, false];
+
+  /* the number a plugin plays as: a number of its own (NEW: 32 .. once given), or a Felucca engine's place */
+  const playsAs = (engine, no) => (engine === PLUGIN.NEW || no >= PLUGIN.PLUG0
+    ? (no != null && no < PLUGIN.OWN ? `ENG ${no}` : t("plgOwn"))
+    : tf("plgReplaces", engineNameOf(dev.info, engine) || `ENG ${engine}`));
+
+  async function choose(list) {
+    const f = list[0];
+    if (!f) return;
+    let bytes;
+    try { bytes = new Uint8Array(await f.arrayBuffer()); } catch (e) { ui.say(`${f.name}: ${e.message}`, "warn"); return; }
+    draft = { file: f.name, bytes, fep: readFep(bytes) };
+    draw();
+  }
+
+  async function install() {
+    const x = draft, k = x.fep.slot, s = dev.plugins.slots[k];
+    const held = s && s.state ? s.name || idOf(s.id) : "";
+    if (!(await ui.confirm(held ? tf("plgOverQ", x.fep.name || x.fep.idText, k + 1, held) : tf("plgInstallQ", x.fep.name || x.fep.idText, k + 1)))) return;
+    busy = true; draw();
+    const bar = root.querySelector(".wprog i");
+    try {
+      await dev.pluginInstall(x.bytes, (n, total) => { if (bar) bar.style.width = (n / total * 100).toFixed(1) + "%"; if (ui.progress) ui.progress(`SLOT ${k + 1} ${kib(n)} / ${kib(total)} KiB`); });
+      pending[k] = x.fep.name || x.fep.idText; draft = null;
+      ui.say(tf("didInstall", x.fep.name || x.fep.idText, k + 1));
+    } catch (e) { ui.say(failText(e), "warn"); }
+    finally { busy = false; draw(); }
+  }
+  async function erase(k) {
+    const s = dev.plugins.slots[k];
+    if (!(await ui.confirm(tf("plgEraseQ", k + 1, s.name || idOf(s.id))))) return;
+    busy = true; draw();
+    try { await dev.pluginErase(k); pending[k] = false; ui.say(`SLOT ${k + 1} ${t("empty")}`); }
+    catch (e) { ui.say(failText(e), "warn"); }
+    finally { busy = false; draw(); }
+  }
+  async function restart() {
+    if (!(await ui.confirm(t("plgRestartQ")))) return;
+    busy = true; draw();
+    try { await dev.pluginRestart(); pending = [false, false]; }
+    catch (e) { ui.say(failText(e), "warn"); }
+    finally { busy = false; draw(); }
+  }
+  const failText = (e) => (e && e.code === "plugin" ? `${e.what.toUpperCase()}: ${t("plgRc" + e.rc)}` : e && e.code === "fep" ? t("fep_" + e.why) : String(e && e.message));
+
+  /* ---- a slot ---- */
+  function slot(k) {
+    const s = dev.plugins.slots[k], held = s.state !== 0 && s.state !== 2;
+    const warn = s.state >= 2;
+    return card(`SLOT ${k + 1}`, "symbol_modular",
+      el("div", { class: "slothead" },
+        el("b", { text: held ? s.name || idOf(s.id) : s.state === 2 ? "—" : t("empty") }),
+        s.state ? el("span", { class: warn ? "lbl over" : "lbl", text: t("plgSt" + s.state) }) : null,
+        el("button", { type: "button", class: "btn sm", disabled: busy || s.state === 0, onclick: () => erase(k) }, ic("symbol_trash"), t("erase"))),
+      held ? el("dl", { class: "kv" },
+        el("dt", { text: "ID" }), el("dd", { text: `${idOf(s.id)} · ${hex(s.id)}` }),
+        el("dt", { text: t("plgVersion") }), el("dd", { text: String(s.version) }),
+        el("dt", { text: t("engine") }), el("dd", { text: s.state === 1 ? `${engineNameOf(dev.info, s.no) || s.name} · ${playsAs(s.no, s.no)}` : s.no < PLUGIN.OWN ? playsAs(s.no, null) : t("plgOwn") })) : null,
+      el("div", { class: "meter", role: "img", "aria-label": `${kib(PLUGIN.SLOT_SIZE[k])} KiB` }, el("i", { style: `width:${held ? 100 : 0}%` })),
+      pending[k] ? el("p", { class: "lbl over", text: `${pending[k]} · ${t("plgPending")}` }) : null);
+  }
+
+  /* ---- a file to install: its header, what it would replace ---- */
+  function fileCard() {
+    const file = el("input", { type: "file", accept: ".fep,application/octet-stream", hidden: true });
+    file.addEventListener("change", () => { choose([...file.files]); file.value = ""; });
+    const x = draft, f = x && x.fep;
+    const c = card(t("plgInstall"), "symbol_upload",
+      el("div", { class: "acts wrap" },
+        el("button", { type: "button", class: "btn", disabled: busy, onclick: () => file.click() }, ic("symbol_folder_open"), t("files")),
+        el("button", { type: "button", class: "btn primary", disabled: busy || !f || !f.ok, onclick: install }, ic("symbol_upload"), t("plgInstall")),
+        x ? el("button", { type: "button", class: "btn", disabled: busy, onclick: () => { draft = null; draw(); } }, ic("symbol_cross"), "CLEAR") : null),
+      x ? el("dl", { class: "kv" },
+        el("dt", { text: t("files") }), el("dd", { text: `${x.file} · ${kib(x.bytes.length)} KiB` }),
+        ...(f.error !== "short" && f.error !== "magic" ? [
+          el("dt", { text: "NAME" }), el("dd", { text: f.name || "—" }),
+          el("dt", { text: "ID" }), el("dd", { text: `${idOf(f.id)} · ${hex(f.id)}` }),
+          el("dt", { text: t("plgVersion") }), el("dd", { text: String(f.version) }),
+          el("dt", { text: "SLOT" }), el("dd", { text: f.slot < PLUGIN.NSLOT ? `SLOT ${f.slot + 1} · ${kib(f.size)} / ${kib(PLUGIN.SLOT_SIZE[f.slot])} KiB` : String(f.slot) }),
+          el("dt", { text: t("engine") }), el("dd", { text: playsAs(f.engine, f.engine === PLUGIN.NEW ? givenNo(f.id) : f.engine) })] : [])) : null,
+      x && !f.ok ? el("p", { class: "lbl over", text: t("fep_" + f.error) }) : null,
+      busy ? el("div", { class: "meter wprog" }, el("i", { style: "width:0" })) : null,
+      file);
+    c.addEventListener("dragover", (e) => { if (e.dataTransfer.types.includes("Files")) { e.preventDefault(); c.classList.add("over"); } });
+    c.addEventListener("dragleave", () => c.classList.remove("over"));
+    c.addEventListener("drop", (e) => { e.preventDefault(); c.classList.remove("over"); if (!busy && e.dataTransfer.files.length) choose([...e.dataTransfer.files]); });
+    return c;
+  }
+  /* the number this device gave the id already (null: given at install) */
+  const givenNo = (id) => { const g = dev.plugins.given.find((x) => x.id === id); return g ? g.no : null; };
+
+  /* ---- the device: restart, the numbers given ---- */
+  function deviceCard() {
+    const g = dev.plugins.given;
+    return card("FM-1", "control_power",
+      el("dl", { class: "kv" },
+        el("dt", { text: "ABI" }), el("dd", { text: String(dev.plugins.abi) }),
+        el("dt", { text: t("plgGiven") }), el("dd", { text: g.length ? g.map((x) => `${x.no} ${idOf(x.id)}`).join(" · ") : "—" })),
+      el("div", { class: "acts wrap" },
+        el("button", { type: "button", class: "btn" + (pending.some(Boolean) ? " primary" : ""), disabled: busy, onclick: restart }, ic("control_power"), t("plgRestart")),
+        el("button", { type: "button", class: "btn", disabled: busy, onclick: async () => { busy = true; draw(); try { await dev.pluginsRefresh(); } finally { busy = false; draw(); } } }, ic("control_arrow_loop"), t("plgReread"))));
+  }
+
+  function draw() {
+    if (!dev) { root.replaceChildren(); return; }
+    if (!dev.pluginOk() || !dev.plugins) {
+      root.replaceChildren(el("div", { class: "grid samples" },
+        card(t("plugins"), "symbol_modular", el("p", { class: "lbl", text: t(dev.pluginOk() ? "plgNoFlash" : "plgNone") }))));
+      return;
+    }
+    root.replaceChildren(el("div", { class: "grid samples" },
+      ...dev.plugins.slots.map((_, k) => slot(k)), fileCard(), deviceCard()));
+  }
+  return {
+    show(device) { if (device !== dev) { draft = null; pending = [false, false]; } dev = device && device.loaded ? device : null; draw(); },
+    refresh() { if (!busy) draw(); },
+  };
+}
+  return { pluginsScreen };
+})();
+/* ---- project.js ---- */
+const __m19 = (() => {
   const { F } = __m0;
   const { el, ic } = __m4;
   const { card, paramRow } = __m5;
@@ -7048,7 +7511,7 @@ function projectScreen(root, ui) {
   return { projectScreen };
 })();
 /* ---- palette.js ---- */
-const __m19 = (() => {
+const __m20 = (() => {
   const { PAL_BUILTIN, PAL_ROLES, PAL_RULE, palLuma, palReadable, palUnreadable } = __m0;
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 Leo Kuroshita (@kurogedelic), Hügelton Instruments
@@ -7106,15 +7569,15 @@ function derive(c) {
   return { ROLES, BUILTIN, RULE, luma, readable, unreadable, rgb565, bytes, fromBytes, to8, hex, fromHex, mix, derive };
 })();
 /* ---- settings.js ---- */
-const __m20 = (() => {
+const __m21 = (() => {
   const { el, ic, store } = __m4;
   const { G_SKIP, HEAD_IC, LAYOUT, paramIcon, placedGlobals, visible } = __m9;
   const { card, cells, paramRow } = __m5;
   const { MENU_ICON, MENU_TAB_ICON } = __m8;
   const { knownLayout } = __m2;
   const { LANGS, getLang, setLang, t } = __m6;
-  const { midiLearn } = __m0;
-  const { BUILTIN, ROLES, derive, fromHex, hex, unreadable } = __m19;
+  const { engineNameOf, midiLearn } = __m0;
+  const { BUILTIN, ROLES, derive, fromHex, hex, unreadable } = __m20;
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 Leo Kuroshita (@kurogedelic), Hügelton Instruments
 //
@@ -7212,7 +7675,7 @@ function settingsScreen(root, ui) {
   function learnCard() {
     const L = dev.info.midiLearn ? dev.learn : null;
     if (!L) return null;
-    const pe0 = dev.info.pe0, eng = (k) => (dev.mix && dev.mix.tracks[k] ? dev.info.engines[dev.mix.tracks[k].engine] || "" : "");
+    const pe0 = dev.info.pe0, eng = (k) => (dev.mix && dev.mix.tracks[k] ? engineNameOf(dev.info, dev.mix.tracks[k].engine) : "");
     const pname = (k, id) => (id < pe0 ? (dev.pdesc[id] || {}).label || `P${id}`
       : k === (dev.sel ?? 0) && dev.pdesc[id] ? dev.pdesc[id].label : `${eng(k)} E${id - pe0 + 1}`);
     const used = L.entries.filter((x) => x.used).sort((a, b) => a.cc - b.cc);
@@ -7348,8 +7811,8 @@ function settingsScreen(root, ui) {
   return { THEMES, SIZES, applyEditorPrefs, settingsScreen };
 })();
 /* ---- main.js ---- */
-const __m21 = (() => {
-  const { makeMockDevice } = __m0;
+const __m22 = (() => {
+  const { engineNameOf, makeMockDevice } = __m0;
   const { Device } = __m2;
   const { $, $$, el, icons, store } = __m4;
   const { onHelp } = __m5;
@@ -7359,9 +7822,10 @@ const __m21 = (() => {
   const { Library, indexedStore, memoryStore } = __m14;
   const { libraryScreen } = __m15;
   const { samplesScreen } = __m17;
-  const { projectScreen } = __m18;
+  const { pluginsScreen } = __m18;
+  const { projectScreen } = __m19;
   const { cells } = __m5;
-  const { applyEditorPrefs, settingsScreen } = __m20;
+  const { applyEditorPrefs, settingsScreen } = __m21;
   const { t } = __m6;
   const { advice } = __m11;
 // SPDX-License-Identifier: GPL-3.0-only
@@ -7369,6 +7833,7 @@ const __m21 = (() => {
 //
 // The page: the frame (header, tracks, flash, places, help bar, messages, dialogs), the connection and its
 // events, and the screens. ?mock=1 drives everything against the simulated device (&legacy=1: no live sync).
+
 
 
 
@@ -7457,14 +7922,20 @@ const settings = settingsScreen($("#s-settings"), ui);
 const seq = seqScreen($("#s-seq"), ui);
 const mix = mixScreen($("#s-mix"));
 const lib = new Library(typeof indexedDB === "undefined" ? memoryStore() : indexedStore());
-/* LIBRARY: SOUNDS (presets, the library, the user bank) or SAMPLES (the three user sample slots) */
-const LIBTAB_KEY = "felucca-editor-libtab";
-const libSounds = el("div"), libSamples = el("div");
-let libTab = store.get(LIBTAB_KEY) === "samples" ? 1 : 0;
-function showLibTab(i) { libTab = i; store.set(LIBTAB_KEY, i ? "samples" : "sounds"); libSounds.hidden = !!i; libSamples.hidden = !i; if (!i) samples.leave(); }
-$("#s-library").replaceChildren(el("div", { class: "subtabs" }, cells(["SOUNDS", "SAMPLES"], libTab, showLibTab, t("library")).el), libSounds, libSamples);
+/* LIBRARY: SOUNDS (presets, the library, the user bank), SAMPLES (the three user sample slots) or PLUGINS (the plugin
+   engines' two slots, 1.9) */
+const LIBTAB_KEY = "felucca-editor-libtab", LIBTABS = ["sounds", "samples", "plugins"];
+const libSounds = el("div"), libSamples = el("div"), libPlugins = el("div");
+let libTab = Math.max(0, LIBTABS.indexOf(store.get(LIBTAB_KEY)));
+function showLibTab(i) {
+  libTab = i; store.set(LIBTAB_KEY, LIBTABS[i]);
+  [libSounds, libSamples, libPlugins].forEach((x, k) => { x.hidden = k !== i; });
+  if (i !== 1) samples.leave();
+}
+$("#s-library").replaceChildren(el("div", { class: "subtabs" }, cells(["SOUNDS", "SAMPLES", "PLUGINS"], libTab, showLibTab, t("library")).el), libSounds, libSamples, libPlugins);
 const library = libraryScreen(libSounds, ui, lib);
 const samples = samplesScreen(libSamples, ui);
+const plugins = pluginsScreen(libPlugins, ui);
 const project = projectScreen($("#s-project"), ui);
 showLibTab(libTab);
 lib.init();
@@ -7474,6 +7945,7 @@ function renderAll() {
   mix.show(dev && dev.loaded ? dev : null);
   library.show(dev && dev.loaded ? dev : null);
   samples.show(dev && dev.loaded ? dev : null);
+  plugins.show(dev && dev.loaded ? dev : null);
   project.show(dev && dev.loaded ? dev : null);
   settings.show(dev && dev.loaded ? dev : null);
   drawTracks(); drawStore(); drawState();
@@ -7544,7 +8016,7 @@ function drawTracks() {
   const n = dev && dev.loaded ? dev.info.ntrk || 0 : 0, box = $("#tracks");
   box.replaceChildren(...Array.from({ length: n }, (_, i) => {
     const x = dev.mix && dev.mix.tracks[i];
-    const name = x ? [dev.info.engines[x.engine], (dev.names[x.engine] || [])[x.preset]].filter(Boolean).join(" ") : "";
+    const name = x ? [engineNameOf(dev.info, x.engine), (dev.names[x.engine] || [])[x.preset]].filter(Boolean).join(" ") : "";
     return el("button", {
       type: "button", class: "trk", role: "radio", "aria-checked": String(i === dev.sel), "aria-label": `${t("track")} ${i + 1}${name ? ": " + name : ""}`,
       onclick: () => { if (dev && i !== dev.sel) dev.selectTrack(i); },
@@ -7586,7 +8058,7 @@ async function connect() {
   $("#connect").disabled = true;
   try {
     if (!access) {
-      if (MOCK) access = makeMockDevice({ legacy: QS.get("legacy") === "1" }).access;
+      if (MOCK) access = makeMockDevice({ legacy: QS.get("legacy") === "1", plugins: QS.get("plugins") === "1" }).access;
       else if (!navigator.requestMIDIAccess) { sayK("nomidi"); return; }
       else { try { access = await navigator.requestMIDIAccess({ sysex: true }); } catch { sayK("denied"); return; } }
       access.onstatechange = onPortState;
@@ -7598,7 +8070,7 @@ async function connect() {
     d.on("progress", (p) => { if (p.what === "desc") $("#msg-t").textContent = `${t("reading")} ${p.n}/${p.total}`; else if (p.what === "steps") $("#msg-t").textContent = `${t("steps")} ${p.n}/${p.total}`; });
     d.on("param", (p) => { sound.param(p.scope, p.id, p.value); seq.param(p.scope, p.id, p.value); settings.param(p.scope, p.id, p.value); });
     const settle = () => { $("#msg-t").textContent = messages.length ? said(messages[0]) : ""; };   /* (the progress line goes) */
-    d.on("reload", () => { sound.show(d); seq.show(d); mix.show(d); library.refresh(); samples.refresh(); project.refresh(); settings.show(d); drawTracks(); drawStore(); drawState(); settle(); });
+    d.on("reload", () => { sound.show(d); seq.show(d); mix.show(d); library.refresh(); samples.refresh(); plugins.refresh(); project.refresh(); settings.show(d); drawTracks(); drawStore(); drawState(); settle(); });
     d.on("mix", () => { drawTracks(); if (d.loaded) mix.all(); });
     d.on("track", (k) => { drawTracks(); mix.track(k); });
     d.on("step", (k) => seq.step(k));
@@ -7609,6 +8081,7 @@ async function connect() {
     d.on("bank", () => { if (d.loaded) library.refresh(); });
     d.on("storage", () => drawStore());
     d.on("samples", () => samples.refresh());
+    d.on("plugins", () => { if (d.loaded) plugins.refresh(); });
     d.on("projects", () => project.refresh());
     d.on("song", () => project.refresh());
     d.on("error", (e) => (["noreply", "backupNewer"].includes(e.message) ? sayK(e.message, "", "warn") : sayK("error", e.message)));
@@ -7618,8 +8091,9 @@ async function connect() {
     d.on("closed", (reason) => {
       if (dev !== d) return;
       dev = null; $("#update").hidden = true; renderAll(); relabel(); sayK(reason);
-      /* USB SERIAL switched: the device leaves the bus and comes back (a port event connects again; else this) */
-      if (reason === "usb") setTimeout(() => { if (!dev && wantConnected && !connecting) connect(); }, 2500);
+      /* USB SERIAL switched, or the FM-1 restarted (plugins): the device leaves the bus and comes back (a port event
+         connects again; else this) */
+      if (reason === "usb" || reason === "restart") setTimeout(() => { if (!dev && wantConnected && !connecting) connect(); }, 2500);
     });
     await d.open();
     if (dev !== d) return;
